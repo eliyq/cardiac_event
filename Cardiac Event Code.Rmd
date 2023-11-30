@@ -1,0 +1,1002 @@
+---
+title: "4110 Prelim 2"
+output: word_document
+date: "2023-11-18"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(nnet)
+library(dplyr)
+library(MASS)
+library(lmtest)
+library(pROC)
+library(ggplot2)
+```
+
+```{r}
+card <- data.frame(read.csv("~/Downloads/4110 HW Data/final_cardiac_data.csv"))
+```
+
+## Cleaning Data
+```{r}
+# Remove the first two columns
+card <- subset(card, select = -c(X))
+card <- subset(card, select = -c(seqn))
+
+# Remove "don't know"s
+card <- subset(card, !((educ == 9 & !is.na(educ)) | (diabetes == 9 & !is.na(diabetes))))
+```
+
+```{r}
+# Recode 'ethnic1' into three categories
+# White = 1, Black = 2, Other = 3
+card$ethnic1 <- ifelse(card$ethnic1 == 3, "1", ifelse(card$ethnic1 == 4, "2", "3"))
+```
+
+```{r}
+# Make smoker 0 and 1 to apply logistic model to predict missing values
+card$smoker_new <- card$smoker - 1
+```
+
+```{r}
+# Remove NA
+card_na <- na.omit(card)
+```
+
+## Replacing the Missing Values
+```{r}
+# Use glm to predict smoker with stepwise both direction (both direction means that we find the best model from both forward and backward selection)
+glm_smoker <- glm(smoker_new ~ . - smoker, data = card_na, family = "binomial")
+step_smoker <- step(glm_smoker)
+card$full_smoker <- ifelse(is.na(card$smoker), ifelse(predict(step_smoker, newdata = card_na) >= 0.5, 1, 0), card$smoker_new) + 1
+# Add 1 back since 1 was deducted to fit the logistic model
+card <- subset(card, select = -c(smoker_new))
+
+# Use multinom to predict diabetes
+diabetes_model <- multinom(diabetes ~ ., data = card_na)
+step_diabetes <- step(diabetes_model)
+card$full_diabetes <- ifelse(is.na(card$diabetes), predict(step_diabetes, newdata = card_na), card$diabetes)
+
+# Use stepwise to predict sleep hours
+sleephrs_model <- lm(sleep.hrs ~ ., data = card_na)
+step_sleep <- step(sleephrs_model)
+card$full_sleep.hrs <- ifelse(is.na(card$sleep.hrs), predict(step_sleep, newdata = card_na), card$sleep.hrs)
+
+# Use stepwise to predict BMI (first assume BMI is numerical to find the missing values, then change to categorical)
+bmi_model <- lm(bmi ~ ., data = card_na)
+step_bmi <- step(bmi_model)
+card$full_bmi <- ifelse(is.na(card$bmi), predict(step_bmi, newdata = card_na), card$bmi)
+```
+
+```{r}
+# With all NA filled
+#card
+
+# Check if any NA still exists
+unique(is.na(card$full_bmi))
+unique(is.na(card$full_sleep.hrs))
+unique(is.na(card$full_smoker))
+unique(is.na(card$full_diabetes))
+```
+
+```{r}
+# Categorized BMI into 4 categories
+# Underweight: <= 18.5, Normal: 18.6-24.9, Overweight: 25-29.9, Obese: >= 30
+card$full_bmi_categorical <- cut(card$full_bmi, breaks=c(-Inf, 18.5, 24.9, 29.9, Inf), labels = c("Underweight","Normal","Overweight", "Obese"))
+```
+
+## Summary Tables
+```{r}
+# Categorical
+categorical_vars <- c("gender", "ethnic1", "educ", "full_diabetes", "full_smoker", "full_bmi_categorical")
+
+categorical_list <- lapply(categorical_vars, function(var) {
+  card %>%
+    group_by(!!sym(var), event) %>%
+    summarise(Count = n(), .groups = 'drop') %>%
+    group_by(!!sym(var)) %>%
+    mutate(Percentage = Count / sum(Count) * 100) %>%
+    ungroup() 
+})
+
+names(categorical_list) <- categorical_vars  
+categorical_list
+
+# Numerical
+numerical_table <- card_na %>%
+  group_by(event) %>%
+  summarize(
+    mean_age = mean(card$age),
+    max_age = max(card$age),
+    min_age = min(card$age),
+    median_age = median(card$age),
+    stdev_age = sd(card$age),
+    mean_sleep_hrs = mean(card$full_sleep.hrs),
+    max_sleep_hrs = max(card$full_sleep.hrs),
+    min_sleep_hrs = min(card$full_sleep.hrs),
+    median_sleep_hrs = median(card$full_sleep.hrs),
+    stdev_sleep_hrs = sd(card$full_sleep.hrs)
+  )
+
+data.frame(t(numerical_table))
+
+null_model <- glm(event ~ 1, data = card)
+
+age_model <- glm(event ~ age, data = card)
+lrtest(null_model, age_model)$Pr[2]
+
+sleep_model<- glm(event ~ full_sleep.hrs, data = card)
+lrtest(null_model, sleep_model)$Pr[2]
+```
+
+## Contingency Tables and Chi-Square Tests
+```{r}
+# Contingency tables and chi square test on each level of categorical variables against the outcome
+chi_sq_results <- list()
+contingency_tables <- list()
+
+for (var in categorical_vars) {
+  contingency_table <- table(card[[var]], card$event)
+  test_result <- chisq.test(contingency_table)
+  contingency_tables[[var]] <- contingency_table
+  chi_sq_results[[var]] <- test_result
+}
+
+contingency_tables
+chi_sq_results
+```
+
+## Mosaic Plots
+```{r}
+# Gender vs Event
+par(las = 1)
+dimnames(contingency_tables$gender) <- list(Gender = c("Male", "Female"), Event = c("No", "Yes"))
+
+spineplot((contingency_tables$gender), col = c("lavender","grey"), main = "Relationship between Gender and Cardiac Event")
+```
+
+```{r}
+# Ethnicity vs Event
+par(las = 1)
+dimnames(contingency_tables$ethnic1) <- list(Ethnicity = c("White", "Black", "Other"), Event = c("No", "Yes"))
+
+spineplot(contingency_tables$ethnic1, col = c("lavender","grey"), main = "Relationship between Ethnicity and Cardiac Event")
+```
+
+```{r}
+# Education vs Event
+par(las = 1, cex.axis = 0.46)
+dimnames(contingency_tables$educ) <- list(Education = c("Less than 9th Grade", "9-11th Grade", "High School Graduate", "Some college or AA Degree", "College Grad and Above"), Event = c("No", "Yes"))
+
+spineplot(contingency_tables$educ, col = c("lavender","grey"),main = "Relationship between Education and Cardiac Event")
+
+# Recategorized education since less than 9th grade does not follow the general linearly decreasing trend, so we introduce a new level to mitigate this situation
+card$educ_new <- ifelse(card$educ == 1, 1, 0)
+
+contingency_table_educ_new <- table(card$educ_new, card$event)
+contingency_table_educ_new
+test_result_educ_new <- chisq.test(contingency_table_educ_new)
+test_result_educ_new
+
+# New contingency table and chi square test for education
+# Others being 9-11th Grade, High School Graduate, Some college or AA Degree, and College Grad and Above
+par(las = 1)
+dimnames(contingency_table_educ_new) <- list(Education = c("Others", "Less than 9th Grade"), Event = c("No", "Yes"))
+
+spineplot(contingency_table_educ_new, col = c("lavender","grey"),main = "Relationship between Education(new) and Cardiac Event")
+```
+
+```{r}
+# Diabetes vs Event
+par(las = 1)
+dimnames(contingency_tables$full_diabetes) <- list(Diabetes = c("Yes", "No","Borderline"), Event = c("No", "Yes"))
+
+spineplot(contingency_tables$full_diabetes, col = c("lavender","grey"), main="Relationship between Diabetes and Cardiac Event")
+
+# Recoding diabetes to make it numerical since there is a linear trend
+card$diabetes_new <- ifelse(card$full_diabetes == 1, 2, ifelse(card$full_diabetes == 2, 0, 1))
+
+contingency_table_diabetes_new <- table(card$diabetes_new, card$event)
+contingency_table_diabetes_new
+test_result_diabetes_new <- chisq.test(contingency_table_diabetes_new)
+test_result_diabetes_new
+
+# New contingency table and chi square test for diabetes
+par(las = 1)
+dimnames(contingency_table_diabetes_new) <- list(Diabetes = c("0", "1", "2"), Event = c("No", "Yes"))
+
+spineplot(contingency_table_diabetes_new, col = c("lavender","grey"),main = "Relationship between Diabetes(new) and Cardiac Event")
+
+# Since there is a linear trend, we justify that diabetes should be treated as a numerical variable
+# Empirical Log-Odds of Event by Diabetes
+diabetes.fac <- factor(cut(card$diabetes_new, breaks = c(-1, 0, 1, 2)))
+table(diabetes.fac)
+
+probabilities <- log(tapply(card$event, diabetes.fac, function(x) mean(x == 1)))
+
+# Choose upper value of the interval
+diabetes <- c(0, 1, 2)
+
+plot(diabetes, probabilities, main = "Empirical Log-Odds of Cardiac Event by Diabetes", xlab = "Diabetes", ylab = "Log-Odds Probability of Event", ylim = c(-3, 0))
+```
+
+```{r}
+# Smoker vs Event
+par(las = 1)
+dimnames(contingency_tables$full_smoker) <- list(Smoker = c("Yes", "No"), Event = c("No", "Yes"))
+
+spineplot(contingency_tables$full_smoker, col=c("lavender","grey"), main="Relationship between Smoker and Cardiac Event")
+```
+
+```{r}
+# BMI vs Event
+par(las = 1)
+dimnames(contingency_tables$full_bmi_categorical) <- list(BMI = c("Underweight", "Normal", "Overweight", "Obese"), Event = c("No", "Yes"))
+
+spineplot(contingency_tables$full_bmi_categorical, col=c("lavender","grey"), main = "Relationship between BMI and Cardiac Event")
+```
+
+## Slicing Plots of Empirical Log-Odds (Numerical Variables)
+```{r}
+# Empirical Log-Odds of Event by Age
+age.fac <- factor(cut(card$age, breaks = seq(min(card$age), max(card$age), by = 10)))
+table (age.fac)
+
+probabilities <- log(tapply(card$event, age.fac, function(x) mean(x == 1)))
+probabilities
+
+# Choose mid value of the interval
+age <- c(25, 35, 45, 55, 65, 75)
+
+plot(age, probabilities, main = "Empirical Log-Odds of Cardiac Event by Age", xlab = "Age", ylab = "Log-Odds Probability of Event", ylim = c(-3, 0))
+
+```
+
+```{r fig.height = 8, fig.width = 8}
+par(mfrow = c(3, 3))
+
+# Empirical Log-Odds of Event by Sleep Hours
+quantile(card$full_sleep.hrs, probs = c(0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9))
+sleep.hrs.fac <- factor(cut(card$full_sleep.hrs, 
+                            breaks = c(min(card$full_sleep.hrs), 5.5, 6.5, 7, 7.5, 8, 9, max(card$full_sleep.hrs))))
+table(sleep.hrs.fac)
+
+probabilities <- log(tapply(card$event, sleep.hrs.fac, function(x) mean(x == 1)))
+
+# Choose mid value of the interval
+sleep <- c(3.75, 6, 6.75, 7.25, 7.75, 8.5, 11.5)
+
+plot(sleep, probabilities, main = "Empirical Log-Odds of Cardiac Event by Sleep Hours", xlab = "Sleep Hours", ylab = "Log-Odds Probability of Event", ylim = c(-3, 0), cex.main = 0.7)
+
+# Transformation of sleep hours - sqrt
+# Empirical Log-Odds of Event by sqrt Sleep Hours
+card$trans_sleep.hrs = sqrt(card$full_sleep.hrs)
+range(card$trans_sleep.hrs)
+quantile(card$trans_sleep.hrs, probs = c(0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9))
+sleep.hrs.fac <- factor(cut(card$trans_sleep.hrs,
+                            breaks = c(min(card$trans_sleep.hrs), 2.4, 2.6, 2.7, 2.8, 2.9, 3.0, max(card$trans_sleep.hrs))))
+table(sleep.hrs.fac)
+
+probabilities <- log(tapply(card$event, sleep.hrs.fac, function(x) mean(x == 1)))
+
+# Choose mid value of the interval
+sleep <- c(1.9, 2.5, 2.65, 2.75, 2.85, 2.95, 3.4)
+
+plot(sleep, probabilities, main = "Empirical Log-Odds of Cardiac Event by sqrt(Sleep Hours)", xlab = " Sqrt Sleep Hours", ylab = "Log-Odds Probability of Event", ylim = c(-3, 0), cex.main = 0.7)
+
+# Transformation of sleep hours - log
+# Empirical Log-Odds of Event by log Sleep Hours
+card$trans_sleep.hrs = log(card$full_sleep.hrs)
+range(card$trans_sleep.hrs)
+quantile(card$trans_sleep.hrs, probs = c(0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9))
+sleep.hrs.fac <- factor(cut(card$trans_sleep.hrs,
+                            breaks = c(min(card$trans_sleep.hrs), 1.7, 1.8, 1.9, 2.0, 2.1, 2.2, max(card$trans_sleep.hrs))))
+table(sleep.hrs.fac)
+
+probabilities <- log(tapply(card$event, sleep.hrs.fac, function(x) mean(x == 1)))
+
+# Choose mid value of the interval
+sleep <- c(1.2, 1.75, 1.85, 1.95, 2.05, 2.15, 2.4)
+
+plot(sleep, probabilities, main = "Empirical Log-Odds of Cardiac Event by log(Sleep Hours)", xlab = "Log Sleep Hours", ylab = "Log-Odds Probability of Event", ylim = c(-3, 0), cex.main = 0.7)
+
+# Transformation of sleep hours - exponential
+# Empirical Log-Odds of Event by exp Sleep Hours
+card$trans_sleep.hrs = exp(card$full_sleep.hrs)
+range(card$trans_sleep.hrs)
+quantile(card$trans_sleep.hrs, probs = c(0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9))
+# Define breaks for the exponential transformation
+exp_breaks <- c(min(card$trans_sleep.hrs), 450, 1096, 1808, 3050, 8103, 13349, max(card$trans_sleep.hrs))
+table(sleep.hrs.fac)
+ 
+# Create a factor variable based on the exponential transformation
+sleep.hrs.fac <- factor(cut(card$trans_sleep.hrs, breaks = exp_breaks))
+
+probabilities <- log(tapply(card$event, sleep.hrs.fac, function(x) mean(x == 1)))
+
+# Choose mid value of the interval
+exp_sleep_mid <- (exp(log(exp_breaks[-1]) + log(exp_breaks[-length(exp_breaks)])) / 2)
+
+plot(exp_sleep_mid, probabilities, main = "Empirical Log-Odds of Cardiac Event by exp(Sleep Hours)", xlab = "Exponential Sleep Hours", ylab = "Log-Odds Probability of Event", ylim = c(-3, 0), cex.main = 0.7)
+
+# Transformation of sleep hours - exponential short (excluding extreme values)
+# Empirical Log-Odds of Event by exp Sleep Hours
+card$trans_sleep.hrs = exp(card$full_sleep.hrs)
+range(card$trans_sleep.hrs)
+quantile(card$trans_sleep.hrs, probs = c(0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9))
+# Define breaks for the exponential transformation
+exp_breaks <- c(min(card$trans_sleep.hrs), 450, 1096, 1808, 3050, 8103, 13349, 18000)
+table(sleep.hrs.fac)
+
+# Create a factor variable based on the exponential transformation
+sleep.hrs.fac <- factor(cut(card$trans_sleep.hrs, breaks = exp_breaks))
+
+probabilities <- log(tapply(card$event, sleep.hrs.fac, function(x) mean(x == 1)))
+
+# Choose mid value of the interval
+exp_sleep_mid <- (exp(log(exp_breaks[-1]) + log(exp_breaks[-length(exp_breaks)])) / 2)
+
+plot(exp_sleep_mid, probabilities, main = "Empirical Log-Odds of Cardiac Event by exp(Sleep Hours) excluding extreme values", xlab = "Exponential Sleep Hours excluding extreme values", ylab = "Log-Odds Probability of Event", cex.main = 0.6, cex.axis = 0.7, ylim = c(-3, 0))
+
+# Transformation of sleep hours - inverse
+# Empirical Log-Odds of Event by inv Sleep Hours
+card$trans_sleep.hrs = 1/ card$full_sleep.hrs
+range(card$trans_sleep.hrs)
+quantile(card$trans_sleep.hrs, probs = c(0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9))
+sleep.hrs.fac <- factor(cut(card$trans_sleep.hrs,
+                            breaks = c(min(card$trans_sleep.hrs), 0.105, 0.12, 0.13, 0.14, 0.15, 0.18, max(card$trans_sleep.hrs))))
+table(sleep.hrs.fac)
+
+probabilities <- log(tapply(card$event, sleep.hrs.fac, function(x) mean(x == 1)))
+
+# Choose mid value of the interval
+sleep <- c(0.088, 0.1125, 0.125, 0.135, 0.145, 0.165, 0.34)
+
+plot(sleep, probabilities, main = "Empirical Log-Odds of Cardiac Event by 1/(Sleep Hours)", cex.main = 0.7, xlab = "Inverse Sleep Hours", ylab = "Log-Odds Probability of Event", ylim = c(-3, 0), cex.main = 0.7)
+``` 
+
+```{r fig.height = 8, fig.width = 8}
+# Empirical Log-Odds of Event by BMI (to check if it should be categorical or numerical)
+par(mfrow = c(3,3))
+quantile(card$full_bmi, probs = c(0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9))
+bmi.fac <- factor(cut(card$full_bmi, breaks = c(min(card$full_bmi), 21.9, 24.1, 25.9, 27.6, 29.2, 30.9, 33.0, 35.8, 41.2, max(card$full_bmi))))
+table(bmi.fac)
+
+# Calculate empirical log-odds probabilities
+probabilities <- log(tapply(card$event, bmi.fac, function(x) mean(x == 1)))
+
+# Choose mid value of the interval
+bmi <- c(18.05, 23, 25, 26.75, 28.4, 30.05, 31.95, 34.4, 38.5, 63.4)
+
+plot(bmi, probabilities, main = "Empirical Log-Odds of Cardiac Event by BMI", xlab = "BMI", ylab = "Log-Odds Probability of Event", ylim = c(-3, 0), cex.main = 0.7)
+
+# Have outlier
+# There is an increasing linear trend
+
+# Transformation of bmi - sqrt
+# Empirical Log-Odds of Event by sqrt BMI
+card$trans_bmi = sqrt(card$full_bmi)
+quantile(card$trans_bmi, probs = c(0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9))
+bmi.fac <- factor(cut(card$trans_bmi, breaks = c(min(card$trans_bmi), 4.679744, 4.909175, 5.089204, 5.253570, 5.399072, 5.549775, 5.735852, 5.983310, 6.421058, max(card$trans_bmi))))
+table(bmi.fac)
+
+# Calculate empirical log-odds probabilities
+probabilities <- log(tapply(card$event, bmi.fac, function(x) mean(x == 1)))
+
+# Choose mid value of the interval
+bmi <- c(4.224017, 4.79446, 4.99919, 5.171387, 5.326321, 5.474424, 5.642814, 5.859581, 6.202184, 7.852727)
+
+plot(bmi, probabilities, main = "Empirical Log-Odds of Cardiac Event by sqrt(BMI)", xlab = "Sqrt BMI", ylab = "Log-Odds Probability of Event", ylim = c(-3, 0), cex.main = 0.7)
+
+# Transformation of bmi - log
+# Empirical Log-Odds of Event by log BMI
+card$trans_bmi = log(card$full_bmi)
+quantile(card$trans_bmi, probs = c(0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9))
+bmi.fac <- factor(cut(card$trans_bmi, breaks = c(min(card$trans_bmi), 3.086487, 3.182212, 3.254243, 3.317816, 3.372453, 3.427515, 3.493473, 3.577948, 3.719166, max(card$trans_bmi))))
+table(bmi.fac)
+
+# Calculate empirical log-odds probabilities
+probabilities <- log(tapply(card$event, bmi.fac, function(x) mean(x == 1)))
+
+# Choose mid value of the interval
+bmi <- c(2.917727, 3.13435, 3.218228, 3.28603, 3.345135, 3.399984, 3.460494, 3.53571, 3.648557, 4.087918)
+
+plot(bmi, probabilities, main = "Empirical Log-Odds of Cardiac Event by log(BMI)", xlab = "Log BMI", ylab = "Log-Odds Probability of Event", ylim = c(-3, 0), cex.main = 0.7)
+
+# Transformation of bmi - exponential
+# Empirical Log-Odds of Event by exp BMI
+card$trans_bmi = exp(card$full_bmi)
+range(card$trans_bmi)
+quantile(card$trans_bmi, probs = c(0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7,0.8,0.9))
+# Define breaks for the exponential transformation
+exp_breaks <- c(min(card$trans_bmi), 3.243763e+09, 2.927501e+10, 1.771035e+11, 9.694551e+11, 4.573269e+12, 2.378319e+13, 1.942175e+14, 3.529738e+15, 8.061641e+17, max(card$trans_bmi))
+ 
+# Create a factor variable based on the exponential transformation
+bmi.fac <- factor(cut(card$trans_bmi, breaks = exp_breaks))
+
+probabilities <- log(tapply(card$event, bmi.fac, function(x) mean(x == 1)))
+
+# Choose mid value of the interval for plotting
+exp_bmi_mid <- (exp(log(exp_breaks[-1]) + log(exp_breaks[-length(exp_breaks)])) / 2)
+
+plot(exp_bmi_mid, probabilities, main = "Empirical Log-Odds of Cardiac Event by exp(BMI)", xlab = "Exponential BMI", ylab = "Log-Odds Probability of Event", ylim = c(-3, 0), cex.main = 0.7)
+
+# Transformation of bmi - inverse
+# Empirical Log-Odds of Event by inv BMI
+card$trans_bmi = 1/(card$full_bmi)
+quantile(card$trans_bmi, probs = c(0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9))
+bmi.fac <- factor(cut(card$trans_bmi, breaks = c(min(card$trans_bmi), 0.02425421, 0.02793296, 0.03039514, 0.03246753, 0.03430542, 0.03623188, 0.03861004, 0.04149378, 0.04566210 , max(card$trans_bmi))))
+table(bmi.fac)
+
+# Calculate empirical log-odds probabilities
+probabilities <- log(tapply(card$event, bmi.fac, function(x) mean(x == 1)))
+
+# Choose mid value of the interval
+bmi <- c(0.01795, 0.0261, 0.0287, 0.03145, 0.0334, 0.03525, 0.0374, 0.04005, 0.0436, 0.05805)
+
+plot(bmi, probabilities, main = "Empirical Log-Odds of Cardiac Event by 1/(BMI)", xlab = "Inverse BMI", ylab = "Log-Odds Probability of Event", ylim = c(-3, 0), cex.main = 0.7)
+```
+
+## Finding Model with Main Effects Using Forward Selection (BMI Categorical)
+```{r}
+# Assuming bmi is categorical 
+null_model1 <- glm(event ~ 1, data = card, family = "binomial")
+main_model1 <- glm(event ~ gender + age + ethnic1 + educ_new + full_sleep.hrs + full_bmi_categorical + full_smoker + diabetes_new, data = card, family = "binomial")
+
+modAIC <- stepAIC(null_model1, direction = "forward", scope = list(lower = null_model1, upper = main_model1), k = 2)
+modAIC
+
+# event ~ age + full_bmi_categorical + diabetes_new + ethnic1 + educ_new + full_smoker
+```
+
+## Finding Interactions from Forward Selection Model (BMI Categorical)
+```{r}
+main_model1 <- glm(formula = event ~ age + full_bmi_categorical + diabetes_new + ethnic1 + educ_new + full_smoker, family = "binomial", data = card)
+
+# Determine interaction terms related to age 
+interaction_model1 <- glm(formula = event ~ age + full_bmi_categorical + 
+diabetes_new + ethnic1 + educ_new + full_smoker + age*full_bmi_categorical + age*diabetes_new + age*ethnic1 + age*educ_new + age*full_smoker, family = "binomial", data = card)
+
+lrtest(main_model1,interaction_model1)
+
+# Determine interaction terms related to full_bmi_categorical
+interaction_model2 <- glm(formula = event ~ age + full_bmi_categorical + diabetes_new + ethnic1 + educ_new + full_smoker + full_bmi_categorical*age +
+full_bmi_categorical*diabetes_new + full_bmi_categorical*ethnic1 + full_bmi_categorical*educ_new + full_bmi_categorical*full_smoker, family = "binomial", data = card)
+
+lrtest(main_model1,interaction_model2)
+
+# Determine interaction terms related to diabetes_new
+interaction_model3 <- glm(formula = event ~ age + full_bmi_categorical + diabetes_new + ethnic1 + educ_new + full_smoker + diabetes_new*age + diabetes_new*full_bmi_categorical + diabetes_new*ethnic1 + diabetes_new*educ_new + diabetes_new*full_smoker, family = "binomial", data = card)
+
+lrtest(main_model1,interaction_model3)
+
+# Determine interaction terms related to ethnic1
+interaction_model4 <- glm(formula = event ~ age + full_bmi_categorical + diabetes_new + ethnic1 + educ_new + full_smoker + ethnic1*age + ethnic1*full_bmi_categorical + ethnic1*diabetes_new + ethnic1*educ_new + ethnic1*full_smoker, family = "binomial", data = card)
+
+lrtest(main_model1,interaction_model4)
+
+# Determine interaction terms related to educ_new
+interaction_model5 <- glm(formula = event ~ age + full_bmi_categorical + diabetes_new + ethnic1 + educ_new + full_smoker + educ_new*age + educ_new*full_bmi_categorical + educ_new*diabetes_new + educ_new*ethnic1 + educ_new*full_smoker, family = "binomial", data = card)
+
+lrtest(main_model1,interaction_model5)
+
+# Determine interaction terms related to full_smoker
+interaction_model6 <- glm(formula = event ~ age + full_bmi_categorical + diabetes_new + ethnic1 + educ_new + full_smoker + full_smoker*age + full_smoker*full_bmi_categorical + full_smoker*diabetes_new + full_smoker*ethnic1 + full_smoker*educ_new, family = "binomial",data = card)
+
+lrtest(main_model1,interaction_model6)
+```
+
+```{r}
+# Likelihood Ratio Test (Chunk Test) for interactions with ethnic1 has the smallest p-value
+# Determine interaction terms related to ethnic1 and age
+interaction_model2_1 <- glm(formula = event ~ age + full_bmi_categorical + diabetes_new + ethnic1 + educ_new + full_smoker + ethnic1*age, family = "binomial", data = card)
+
+anova(interaction_model2_1, test = "Chisq")
+
+# Determine interaction terms related to ethnic1 and full_bmi_categorical
+interaction_model2_2 <- glm(formula = event ~ age + full_bmi_categorical + diabetes_new + ethnic1 + educ_new + full_smoker + ethnic1*full_bmi_categorical, family = "binomial", data = card)
+
+anova(interaction_model2_2, test = "Chisq")
+
+# Determine interaction terms related to ethnic1 and diabetes_new
+interaction_model2_3 <- glm(formula = event ~ age + full_bmi_categorical + diabetes_new + ethnic1 + educ_new + full_smoker + ethnic1*diabetes_new, family = "binomial", data = card)
+
+anova(interaction_model2_3, test = "Chisq")
+
+# Determine interaction terms related to ethnic1 and educ_new
+interaction_model2_4 <- glm(formula = event ~ age + full_bmi_categorical + diabetes_new + ethnic1 + educ_new + full_smoker + ethnic1*educ_new, family = "binomial", data = card)
+
+anova(interaction_model2_4, test = "Chisq")
+
+# Determine interaction terms related to ethnic1 and full_smoke
+interaction_model2_5 <- glm(formula = event ~ age + full_bmi_categorical + diabetes_new + ethnic1 + educ_new + full_smoker + ethnic1*full_smoker, family = "binomial", data = card)
+
+anova(interaction_model2_5, test = "Chisq")
+
+# Rename the best model with interaction when BMI is categorical as model1 
+model1 <- interaction_model2_1
+
+# event ~ age + full_bmi_categorical + diabetes_new + ethnic1 + educ_new + full_smoker + ethnic1*age
+```
+
+## Transformation on Model with Interaction (BMI Categorical)
+```{r}
+# no transformation
+model1 <- glm(formula = event ~ age + full_bmi_categorical + diabetes_new + ethnic1 + educ_new + full_smoker + ethnic1*age, family = "binomial", data = card)
+summary(model1)$aic
+
+#age log
+model1_age_log <- glm(formula = event ~ log(age) + full_bmi_categorical + diabetes_new + ethnic1 + educ_new + full_smoker + ethnic1*age, family = "binomial", data = card)
+summary(model1_age_log)$aic
+
+#age exp
+model1_age_exp <- glm(formula = event ~ exp(age) + full_bmi_categorical + diabetes_new + ethnic1 + educ_new + full_smoker + ethnic1*age, family = "binomial", data = card)
+summary(model1_age_exp)$aic
+
+#diabetes exp
+model1_diabetes_exp <- glm(formula = event ~ age + full_bmi_categorical + exp(diabetes_new) + ethnic1 + educ_new + full_smoker + ethnic1*age, family = "binomial", data = card)
+summary(model1_diabetes_exp)$aic
+
+#age exp and diabetes exp
+model1_age_diabetes_exp <- glm(formula = event ~ exp(age) + full_bmi_categorical + exp(diabetes_new) + ethnic1 + educ_new + full_smoker + ethnic1*age, family = "binomial", data = card)
+summary(model1_age_diabetes_exp)$aic
+
+#age sqrt
+model1_age_sqrt <- glm(formula = event ~ sqrt(age) + full_bmi_categorical + diabetes_new + ethnic1 + educ_new + full_smoker + ethnic1*age, family = "binomial", data = card)
+summary(model1_age_sqrt)$aic
+
+#diabetes sqrt
+model1_diabetes_sqrt <- glm(formula = event ~ age + full_bmi_categorical + sqrt(diabetes_new) + ethnic1 + educ_new + full_smoker + ethnic1*age, family = "binomial", data = card)
+summary(model1_diabetes_sqrt)$aic
+
+#age sqrt and diabetes sqrt
+model1_age_diabetes_sqrt <- glm(formula = event ~ sqrt(age) + full_bmi_categorical + sqrt(diabetes_new) + ethnic1 + educ_new + full_smoker + ethnic1*age, family = "binomial", data = card)
+summary(model1_age_diabetes_sqrt)$aic
+
+#age inverse
+model1_age_inverse <- glm(formula = event ~ I(1/age) + full_bmi_categorical + diabetes_new + ethnic1 + educ_new + full_smoker + ethnic1*age, family = "binomial", data = card)
+summary(model1_age_inverse)$aic
+
+#age log and diabetes sqrt
+model1_age_log_diabetes_sqrt <- glm(formula = event ~ log(age) + full_bmi_categorical + sqrt(diabetes_new) + ethnic1 + educ_new + full_smoker + ethnic1*age, family = "binomial", data = card)
+summary(model1_age_log_diabetes_sqrt)$aic
+
+#age log and diabetes^2
+model1_age_log_diabetes2 <- glm(formula = event ~ log(age) + full_bmi_categorical + diabetes_new^2 + ethnic1 + educ_new + full_smoker + ethnic1*age, family = "binomial", data = card)
+summary(model1_age_log_diabetes2)$aic
+
+#age exp and diabetes sqrt
+model1_age_exp_diabetes_sqrt <- glm(formula = event ~ exp(age) + full_bmi_categorical + sqrt(diabetes_new) + ethnic1 + educ_new + full_smoker + ethnic1*age, family = "binomial", data = card)
+summary(model1_age_exp_diabetes_sqrt)$aic
+
+#age exp and diabetes^2
+model1_age_exp_diabetes2 <- glm(formula = event ~ exp(age) + full_bmi_categorical + diabetes_new^2 + ethnic1 + educ_new + full_smoker + ethnic1*age, family = "binomial", data = card)
+summary(model1_age_exp_diabetes_sqrt)$aic
+
+#age exp and diabetes sqrt
+model1_age_exp_diabetes_sqrt <- glm(formula = event ~ exp(age) + full_bmi_categorical + sqrt(diabetes_new) + ethnic1 + educ_new + full_smoker + ethnic1*age, family = "binomial", data = card)
+summary(model1_age_exp_diabetes_sqrt)$aic
+
+#age exp and diabetes^2
+model1_age_exp_diabetes2 <- glm(formula = event ~ exp(age) + full_bmi_categorical + diabetes_new^2 + ethnic1 + educ_new + full_smoker + ethnic1*age, family = "binomial", data = card)
+summary(model1_age_exp_diabetes_sqrt)$aic
+
+#age sqrt and diabetes exp
+model1_age_sqrt_diabetes_exp <- glm(formula = event ~ sqrt(age) + full_bmi_categorical + exp(diabetes_new) + ethnic1 + educ_new + full_smoker + ethnic1*age, family = "binomial", data = card)
+summary(model1_age_sqrt_diabetes_exp )$aic
+
+#age sqrt and diabetes^2
+model1_age_sqrt_diabetes2 <- glm(formula = event ~ sqrt(age) + full_bmi_categorical + diabetes_new^2 + ethnic1 + educ_new + full_smoker + ethnic1*age, family = "binomial", data = card)
+summary(model1_age_sqrt_diabetes2)$aic
+
+#age inverse and diabetes exp
+model1_age_inverse_diabetes_exp <- glm(formula = event ~ I(1/age) + full_bmi_categorical + exp(diabetes_new) + ethnic1 + educ_new + full_smoker + ethnic1*age, family = "binomial", data = card)
+summary(model1_age_inverse_diabetes_exp )$aic
+
+#age inverse and diabetes sqrt
+model1_age_inverse_diabetes_sqrt <- glm(formula = event ~ I(1/age) + full_bmi_categorical + sqrt(diabetes_new) + ethnic1 + educ_new + full_smoker + ethnic1*age, family = "binomial", data = card)
+summary(model1_age_inverse_diabetes_sqrt )$aic
+
+#age inverse and diabetes^2
+model1_age_inverse_diabetes2 <- glm(formula = event ~ I(1/age) + full_bmi_categorical + diabetes_new^2 + ethnic1 + educ_new + full_smoker + ethnic1*age, family = "binomial", data = card)
+summary(model1_age_inverse_diabetes2)$aic
+
+#age^2 and diabetes exp
+model1_age2_diabetes_exp <- glm(formula = event ~ age^2 + full_bmi_categorical + exp(diabetes_new) + ethnic1 + educ_new + full_smoker + ethnic1*age, family = "binomial", data = card)
+summary(model1_age2_diabetes_exp)$aic
+
+#age^2 and diabetes sqrt
+model1_age2_diabetes_sqrt <- glm(formula = event ~ age^2 + full_bmi_categorical + sqrt(diabetes_new) + ethnic1 + educ_new + full_smoker + ethnic1*age, family = "binomial", data = card)
+summary(model1_age2_diabetes_sqrt)$aic
+
+# event ~ age + full_bmi_categorical + exp(diabetes_new) + ethnic1 + educ_new + full_smoker + ethnic1*age
+```                                   
+
+## Finding Main Effects Using Forward Selection (BMI Numerical)
+```{r}
+# Assuming bmi is numerical 
+null_model2 <- glm(event ~ 1, data = card, family = "binomial")
+main_model2 <- glm(event ~ gender + age + ethnic1 + educ_new + full_sleep.hrs + full_bmi + full_smoker + diabetes_new, data = card, family = "binomial")
+
+modAIC <- stepAIC(null_model2, direction = "forward", scope = list(lower = null_model2, upper = main_model2), k = 2)
+modAIC
+
+# event ~ age + full_bmi + diabetes_new + ethnic1 + educ_new + full_smoker
+```
+
+## Finding Interactions from Forward Selection Model (BMI Numerical)
+```{r}
+main_model2 <- glm(formula = event ~ age + full_bmi + diabetes_new + ethnic1 + educ_new + full_smoker, family = "binomial", data = card)
+
+# Determine interaction terms related to age 
+interaction_model1 <- glm(formula = event ~ age + full_bmi + 
+diabetes_new + ethnic1 + educ_new + full_smoker + age*full_bmi + age*diabetes_new + age*ethnic1 + age*educ_new + age*full_smoker, family = "binomial", data = card)
+
+lrtest(main_model2,interaction_model1)
+
+# Determine interaction terms related to full_bmi
+interaction_model2 <- glm(formula = event ~ age + full_bmi + diabetes_new + ethnic1 + educ_new + full_smoker + full_bmi*age + full_bmi*diabetes_new + full_bmi*ethnic1 + full_bmi*educ_new + full_bmi*full_smoker, family = "binomial", data = card)
+
+lrtest(main_model2,interaction_model2)
+
+# Determine interaction terms related to diabetes_new
+interaction_model3 <- glm(formula = event ~ age + full_bmi + diabetes_new + ethnic1 + educ_new + full_smoker + diabetes_new*age + diabetes_new*full_bmi + diabetes_new*ethnic1 + diabetes_new*educ_new + diabetes_new*full_smoker, family = "binomial", data = card)
+
+lrtest(main_model2,interaction_model3)
+
+# Determine interaction terms related to ethnic1
+interaction_model4 <- glm(formula = event ~ age + full_bmi + diabetes_new + ethnic1 + educ_new + full_smoker + ethnic1*age + ethnic1*full_bmi + ethnic1*diabetes_new + ethnic1*educ_new + ethnic1*full_smoker, family = "binomial", data = card)
+
+lrtest(main_model2,interaction_model4)
+
+# Determine interaction terms related to educ_new
+interaction_model5 <- glm(formula = event ~ age + full_bmi + diabetes_new + ethnic1 + educ_new + full_smoker + educ_new*age + educ_new*full_bmi + educ_new*diabetes_new + educ_new*ethnic1 + educ_new*full_smoker, family = "binomial", data = card)
+
+lrtest(main_model2,interaction_model5)
+
+# Determine interaction terms related to full_smoker
+interaction_model6 <- glm(formula = event ~ age + full_bmi + diabetes_new + ethnic1 + educ_new + full_smoker + full_smoker*age + full_smoker*full_bmi + full_smoker*diabetes_new + full_smoker*ethnic1 + full_smoker*educ_new, family = "binomial",data = card)
+
+lrtest(main_model2,interaction_model6)
+
+# None of the p-values are significantly small so should keep main model without any interaction
+
+# Rename main_model2 as model2 since none of the interactions are significant
+model2 <- main_model2
+```
+
+## Transformation on Main Model (BMI Numerical)
+```{r}
+#no transformation
+model2 <- glm(formula = event ~ age + full_bmi + diabetes_new + ethnic1 + educ_new + full_smoker, family = "binomial", data = card)
+summary(model2)$aic
+
+#age log
+model2_age_log <- glm(formula = event ~ log(age) + full_bmi + diabetes_new + ethnic1 + educ_new + full_smoker, family = "binomial", data = card)
+summary(model2_age_log)$aic
+
+#age exp
+model2_age_exp <- glm(formula = event ~ exp(age) + full_bmi + diabetes_new + ethnic1 + educ_new + full_smoker, family = "binomial", data = card)
+summary(model2_age_exp)$aic
+
+#age sqrt
+model2_age_sqrt <- glm(formula = event ~ sqrt(age) + full_bmi + diabetes_new + ethnic1 + educ_new + full_smoker, family = "binomial", data = card)
+summary(model2_age_sqrt)$aic
+
+#age inverse
+model2_age_inv <- glm(formula = event ~ 1/(age) + full_bmi + diabetes_new + ethnic1 + educ_new + full_smoker, family = "binomial", data = card)
+summary(model2_age_inv)$aic
+
+#diabetes exp
+model2_diabetes_exp <- glm(formula = event ~ age + full_bmi + exp(diabetes_new) + ethnic1 + educ_new + full_smoker, family = "binomial", data = card)
+summary(model2_diabetes_exp)$aic
+
+#diabetes sqrt
+model2_diabetes_sqrt <- glm(formula = event ~ age + full_bmi + sqrt(diabetes_new) + ethnic1 + educ_new + full_smoker, family = "binomial", data = card)
+summary(model2_diabetes_sqrt)$aic
+
+#bmi log
+model2_bmi_log <- glm(formula = event ~ age + log(full_bmi) + diabetes_new + ethnic1 + educ_new + full_smoker, family = "binomial", data = card)
+summary(model2_bmi_log)$aic
+
+#bmi exp
+model2_bmi_exp <- glm(formula = event ~ age + exp(full_bmi) + diabetes_new + ethnic1 + educ_new + full_smoker, family = "binomial", data = card)
+summary(model2_bmi_exp)$aic
+
+#bmi sqrt
+model2_bmi_sqrt <- glm(formula = event ~ age + sqrt(full_bmi) + diabetes_new + ethnic1 + educ_new + full_smoker, family = "binomial", data = card)
+summary(model2_bmi_sqrt)$aic
+
+#bmi inverse
+model2_bmi_inv <- glm(formula = event ~ age + 1/(full_bmi) + diabetes_new + ethnic1 + educ_new + full_smoker, family = "binomial", data = card)
+summary(model2_bmi_inv)$aic
+
+# event ~ age + log(full_bmi) + diabetes_new + ethnic1 + educ_new + full_smoker
+```
+
+```{r}
+# Since log bmi has the lowest AIC, add more transformations on top of log bmi
+#only bmi log
+model2_bmi_log <- glm(formula = event ~ age + log(full_bmi) + diabetes_new + ethnic1 + educ_new + full_smoker, family = "binomial", data = card)
+summary(model2_bmi_log)$aic
+
+#bmi log and age log
+model2_bmi_log_age_log <- glm(formula = event ~ log(age) + log(full_bmi) + diabetes_new + ethnic1 + educ_new + full_smoker, family = "binomial", data = card)
+summary(model2_bmi_log_age_log)$aic
+
+#bmi log and age exp
+model2_bmi_log_age_exp <- glm(formula = event ~ exp(age) + log(full_bmi) + diabetes_new + ethnic1 + educ_new + full_smoker, family = "binomial", data = card)
+summary(model2_bmi_log_age_exp)$aic
+
+#bmi log and age sqrt
+model2_bmi_log_age_sqrt <- glm(formula = event ~ sqrt(age) + log(full_bmi) + diabetes_new + ethnic1 + educ_new + full_smoker, family = "binomial", data = card)
+summary(model2_bmi_log_age_sqrt)$aic
+
+#bmi log and age inverse
+model2_bmi_log_age_inv <- glm(formula = event ~ 1/(age) + log(full_bmi) + diabetes_new + ethnic1 + educ_new + full_smoker, family = "binomial", data = card)
+summary(model2_bmi_log_age_inv)$aic
+
+#bmi log and diabetes exp
+model2_bmi_log_diabetes_exp <- glm(formula = event ~ age + log(full_bmi) + exp(diabetes_new) + ethnic1 + educ_new + full_smoker, family = "binomial", data = card)
+summary(model2_bmi_log_diabetes_exp)$aic
+
+#bmi log and diabetes sqrt
+model2_bmi_log_diabetes_sqrt <- glm(formula = event ~ age + log(full_bmi) + sqrt(diabetes_new) + ethnic1 + educ_new + full_smoker, family = "binomial", data = card)
+summary(model2_bmi_log_diabetes_sqrt)$aic
+
+# event ~ sqrt(age) + log(full_bmi) + diabetes_new + ethnic1 + educ_new + full_smoker
+```
+
+```{r}
+# Since bmi log and age sqrt has the lowest AIC, add more transformation on top of bmi log and age sqrt
+#bmi log and age sqrt
+model2_bmi_log_age_sqrt <- glm(formula = event ~ sqrt(age) + log(full_bmi) + diabetes_new + ethnic1 + educ_new + full_smoker, family = "binomial", data = card)
+summary(model2_bmi_log_age_sqrt)$aic
+
+#bmi log and age sqrt and diabetes exp
+model2_bmi_log_age_sqrt_diabetes_exp <- glm(formula = event ~ sqrt(age) + log(full_bmi) + exp(diabetes_new) + ethnic1 + educ_new + full_smoker, family = "binomial", data = card)
+summary(model2_bmi_log_age_sqrt_diabetes_exp)$aic
+
+#bmi log and age sqrt and diabetes sqrt
+model2_bmi_log_age_sqrt_diabetes_sqrt <- glm(formula = event ~ sqrt(age) + log(full_bmi) + sqrt(diabetes_new) + ethnic1 + educ_new + full_smoker, family = "binomial", data = card)
+summary(model2_bmi_log_age_sqrt_diabetes_sqrt)$aic
+
+# event ~ sqrt(age) + log(full_bmi) + exp(diabetes_new) + ethnic1 + educ_new + full_smoker
+```
+
+## Seven Candidate Models for Comparison
+```{r}
+# BMI Categorical 
+# Directly from forward selection
+candidate_model1 <- glm(formula = event ~ age + full_bmi_categorical + diabetes_new + ethnic1 + educ_new + full_smoker, family = "binomial", data = card)
+# aic
+summary(candidate_model1)$aic
+# deviance
+summary(candidate_model1)$null.deviance - summary(candidate_model1)$deviance 
+# df
+summary(candidate_model1)$df.null - summary(candidate_model1)$df.residual
+# auc
+fitted_probs <- predict(candidate_model1, type = "response")
+fitted_class <- ifelse(fitted_probs > 0.5, 1, 0)
+roc_obj <- roc(card$event, fitted_probs, print.auc = TRUE)
+auc(roc_obj)
+
+# With interaction
+candidate_model2 <- glm(formula = event ~ age + full_bmi_categorical + diabetes_new + ethnic1 + educ_new + full_smoker + ethnic1*age, family = "binomial", data = card)
+# added predictor p-value
+anova(candidate_model2, test = "Chisq")$Pr[8]
+# aic
+summary(candidate_model2)$aic
+# deviance
+summary(candidate_model2)$null.deviance - summary(candidate_model2)$deviance 
+# df
+summary(candidate_model2)$df.null - summary(candidate_model2)$df.residual
+# auc
+fitted_probs <- predict(candidate_model2, type = "response")
+fitted_class <- ifelse(fitted_probs > 0.5, 1, 0)
+roc_obj <- roc(card$event, fitted_probs, print.auc = TRUE)
+auc(roc_obj)
+
+# With transformation on top of interaction
+candidate_model3 <- glm(formula = event ~ age + full_bmi_categorical + exp(diabetes_new) + ethnic1 + educ_new + full_smoker + ethnic1*age, family = "binomial", data = card)
+# added predictor p-value
+anova(candidate_model3, test = "Chisq")$Pr[4]
+# aic 
+summary(candidate_model3)$aic
+# deviance
+summary(candidate_model3)$null.deviance - summary(candidate_model3)$deviance 
+# df
+summary(candidate_model3)$df.null - summary(candidate_model3)$df.residual
+# auc
+fitted_probs <- predict(candidate_model3, type = "response")
+fitted_class <- ifelse(fitted_probs > 0.5, 1, 0)
+roc_obj <- roc(card$event, fitted_probs, print.auc = TRUE)
+auc(roc_obj)
+
+# BMI as Numerical
+# Directly from forward selection
+candidate_model4 <- glm(formula = event ~ age + full_bmi + diabetes_new + ethnic1 + educ_new + full_smoker, family = "binomial", data = card)
+# aic 
+summary(candidate_model4)$aic
+# deviance
+summary(candidate_model4)$null.deviance - summary(candidate_model4)$deviance 
+# df
+summary(candidate_model4)$df.null - summary(candidate_model4)$df.residual
+# auc
+fitted_probs <- predict(candidate_model4, type = "response")
+fitted_class <- ifelse(fitted_probs > 0.5, 1, 0)
+roc_obj <- roc(card$event, fitted_probs, print.auc = TRUE)
+auc(roc_obj)
+
+# With transformation of one numerical predictor
+candidate_model5 <- glm(formula = event ~ age + log(full_bmi) + diabetes_new + ethnic1 + educ_new + full_smoker, family = "binomial", data = card)
+# added predictor p-value
+anova(candidate_model5, test = "Chisq")$Pr[3]
+# aic 
+summary(candidate_model5)$aic
+# deviance
+summary(candidate_model5)$null.deviance - summary(candidate_model5)$deviance 
+# df
+summary(candidate_model5)$df.null - summary(candidate_model5)$df.residual
+# auc
+fitted_probs <- predict(candidate_model5, type = "response")
+fitted_class <- ifelse(fitted_probs > 0.5, 1, 0)
+roc_obj <- roc(card$event, fitted_probs, print.auc = TRUE)
+auc(roc_obj)
+
+# With transformation of two numerical predictor
+candidate_model6 <- glm(formula = event ~ sqrt(age) + log(full_bmi) + diabetes_new + ethnic1 + educ_new + full_smoker, family = "binomial", data = card)
+# added predictor p-value
+anova(candidate_model6, test = "Chisq")$Pr[2]
+# aic 
+summary(candidate_model6)$aic
+# deviance
+summary(candidate_model6)$null.deviance - summary(candidate_model6)$deviance 
+# df
+summary(candidate_model6)$df.null - summary(candidate_model6)$df.residual
+# auc
+fitted_probs <- predict(candidate_model6, type = "response")
+fitted_class <- ifelse(fitted_probs > 0.5, 1, 0)
+roc_obj <- roc(card$event, fitted_probs, print.auc = TRUE)
+auc(roc_obj)
+
+# With transformation of three numerical predictor
+candidate_model7 <- glm(formula = event ~ sqrt(age) + log(full_bmi) + exp(diabetes_new) + ethnic1 + educ_new + full_smoker, family = "binomial", data = card)
+# added predictor p-value
+anova(candidate_model7, test = "Chisq")$Pr[4]
+# aic 
+summary(candidate_model7)$aic
+# deviance
+summary(candidate_model7)$null.deviance - summary(candidate_model7)$deviance 
+# df
+summary(candidate_model7)$df.null - summary(candidate_model7)$df.residual
+# auc
+fitted_probs <- predict(candidate_model7, type = "response")
+fitted_class <- ifelse(fitted_probs > 0.5, 1, 0)
+roc_obj <- roc(card$event, fitted_probs, print.auc = TRUE)
+auc(roc_obj)
+
+# The final model that we selected is treating BMI as numerical and having one transformation on one of the numerical predictors (log bmi)
+# This is candidate_model5, which is event ~ age + log(full_bmi) + diabetes_new + ethnic1 + educ_new + full_smoker
+```
+
+## Selected Model
+```{r}
+selected_model <- glm(formula = event ~ age + log(full_bmi) + diabetes_new + ethnic1 + educ_new + full_smoker, family = "binomial", data = card)
+
+summary(selected_model)
+
+# selected_model: event ~ age + log(full_bmi) + diabetes_new + ethnic1 + educ_new + full_smoker
+```
+
+## Final Model
+```{r}
+summary(selected_model)$coefficients[6, 4]
+# Since the p-value for β_ethnic13 is greater than 0.05, we fail to reject the null hypothesis that β_ethnic13 = 0. There is no convincing evidence that β_ethnic13 not 0.
+# Remove ethnic13 from selected_model
+
+# Drop ethnic13 since its p-value is more than 0.05
+# Create dummy variables for each level of ethnic1 (except the reference level)
+card <- card %>% 
+  mutate(ethnic12 = as.numeric(ethnic1 == 2),
+         ethnic13 = as.numeric(ethnic1 == 3))
+
+final_model <- glm(event ~ age + log(full_bmi) + diabetes_new + ethnic12 + educ_new + full_smoker, family = "binomial", data = card)
+
+summary(final_model)
+
+# final_model
+# logit(π_event) = β_intercept + β_age * age + β_log_bmi * log(full_bmi) + β_diabetes * diabetes_new + β_ethnic12 * ethnic12 + β_educ * educ_new + β_smoker * full_smoker
+
+# final_model formula: logit(π_event) = -10.647425 + 0.066788 * age + 2.083876 * log(full_bmi) + 0.460508 * diabetes_new + 0.563373 * ethnic12 + (-0.623426) * educ_new + (-0.294237) * full_smoker
+```
+
+## Goodness of Fit Test
+```{r}
+1 - pchisq(628.8, 6)
+# We have a model deviance of 2601.4 - 1972.6 = 628.8. This is distributed as a chi-square with 6 df. 
+# Pr(chisq(7) > 628.8) < 0.0001.
+# Since the critical value is 12.592, which is smaller than the test statistics G^2 = 628.8, we should reject the null hypothesis that the model does not have good fit. There is convincing evidence that the model has good fit. 
+```
+
+## Odds Ratio, Odds Ratio Confidence Interval, and p-values for Selected Predictors
+```{r}
+coef_table <- summary(final_model)$coefficients
+
+# Calculate Odds Ratios, Confidence Intervals, p-values
+coef_table <- cbind(coef_table, exp(coef(final_model)))
+conf_int <- confint(final_model)
+coef_table <- cbind(coef_table, exp(conf_int))
+coef_table <- cbind(coef_table, "p-value" = 2 * (1 - pnorm(abs(coef_table[, "z value"]))))
+
+colnames(coef_table) <- c("Estimate", "Standard Error", "z value", "Pr(>|z|)", "Odds Ratio", "2.5 %", "97.5 %", "p-value")
+
+coef_table
+```
+
+## Classification Table
+```{r}
+# Full probabilities
+fitted_probs <- predict(final_model, type = "response")
+
+# Convert probabilities to binary classification
+fitted_class <- ifelse(fitted_probs > 0.5, 1, 0)
+
+# Create a confusion matrix
+table(predicted = fitted_class, actual = card$event)
+
+```
+
+## ROC Curve
+```{r}
+roc_obj <- roc(card$event, fitted_probs, print.auc = TRUE)
+
+plot(roc_obj, main = "ROC Curve", xlim = c(1, 0), ylim = c(0, 1))
+
+auc_value <- auc(roc_obj)
+text(x = 0.4, y = 0.4, labels = paste("AUC =", round(auc_value, 2)))
+```
+
+## Success Probabilities of Representative
+```{r}
+# age probability of event with full_somker as category 
+# final_model formula: event = -10.647425 + 0.066788 * age + 2.083876 * log(full_bmi) + 0.460508 * diabetes_new + 0.563373 * ethnic12 + (-0.623426) * educ_new + (-0.294237) * full_smoker
+
+# We choose age as the numerical variable, which will be the x axis. We choose diabetes_new as the categorical varibale and use mean value of the rest of the varibales to show the probability plot.
+
+mean_log_full_bmi <- mean(log(card$full_bmi))
+mean_ethinc12 <- mean(card$ethnic12)
+mean_diabetes_new <- mean(card$diabetes_new)
+mean_educ_new <- mean(card$educ_new)
+the_rest_mean <- mean_log_full_bmi + mean_ethinc12 + mean_diabetes_new + mean_educ_new
+
+coef(final_model)[7]
+# x axis
+x <- seq(min(card$age), max(card$age), by = 1)
+# full_smoker = 1
+y1 <- exp(coef(final_model)[1] + coef(final_model)[2] * x + coef(final_model)[7]*1) / (1 + exp(coef(final_model)[1] + coef(final_model)[2] * x + coef(final_model)[7]*1))
+# full_smoker = 2
+y2 <- exp(coef(final_model)[1] + coef(final_model)[2] * x + coef(final_model)[7]*2) / (1 + exp(coef(final_model)[1] + coef(final_model)[2] * x + coef(final_model)[7]*2))
+
+df <- data.frame(x = x, y = y1, y2 = y2)
+
+combined_plot <- ggplot(data = df, aes(x = x)) +
+  geom_line(aes(y = y1, color = "Blue")) +
+  geom_line(aes(y = y2, color = "Red")) +
+  labs(x = "Age", y = "Probability of Event") +
+  ggtitle("Success Probability of Event vs Age") +
+  scale_color_manual(values = c("Blue" = "blue", "Red" = "red"),
+                     labels = c("Blue" = "full_smoker = 1", "Red" = "full_smoker = 2")) + theme_minimal()
+
+combined_plot
+```
+
+
+
+
+
+
