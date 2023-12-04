@@ -18,7 +18,7 @@ library(ggplot2)
 ```
 
 ```{r}
-card <- data.frame(read.csv("~/Downloads/4110 HW Data/final_cardiac_data.csv"))
+card <- data.frame(read.csv("~/Downloads/final_cardiac_data.csv"))
 ```
 
 ## Cleaning Data
